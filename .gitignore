@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+vs/
+offline_wheels/
+*.zip
+*.STEP
+*.step
+*.stp
+cad_model.glb
+cad_model.bin
+bom_data.sqlite

@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Enterprise 3D CAD Analytics Workbench</title>
+    <script src="lib/three.min.js"></script>
+    <script src="lib/GLTFLoader.js"></script>
+    <script src="lib/OrbitControls.js"></script>
+    <script src="lib/sql-wasm.js"></script>
+    <script src="lib/xlsx.full.min.js"></script>
+    <script src="lib/jspdf.umd.min.js"></script>
+    <style>
+        body { margin: 0; display: flex; font-family: sans-serif; overflow: hidden; background: #f8f9fa; }
+        #viewer { width: 70%; height: 100vh; position: relative; }
+        #sidebar { width: 30%; height: 100vh; background: #ffffff; border-left: 1px solid #dee2e6; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; z-index: 10; box-shadow: -4px 0 16px rgba(0,0,0,0.03); }
+        #toolbar { position: absolute; top: 20px; left: 20px; background: rgba(255,255,255,0.96); padding: 12px 16px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); display: flex; flex-wrap: wrap; gap: 8px 10px; z-index: 50; align-items: center; border: 1px solid rgba(0,0,0,0.05); max-width: calc(70% - 40px); box-sizing: border-box; }
+        .tool-btn { padding: 6px 14px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid #ced4da; border-radius: 6px; background: white; color: #495057; transition: all 0.15s ease; }
+        .tool-btn:hover { background: #f1f3f5; color: #212529; }
+        .tool-btn.active { background: #0d6efd; color: white; border-color: #0d6efd; }
+        #searchBar { width: 100%; padding: 10px 12px; font-size: 14px; border-radius: 6px; border: 1px solid #ced4da; margin-bottom: 15px; box-sizing: border-box; }
+        #bomList { flex-grow: 1; overflow-y: auto; border: 1px solid #e9ecef; border-radius: 6px; padding: 5px; }
+        .bom-item { padding: 12px; border-bottom: 1px solid #f1f3f5; cursor: pointer; border-radius: 4px; transition: background 0.1s ease; }
+        .bom-item:hover { background: #f8f9fa; }
+        .bom-item.selected { background: #e7f1ff !important; border-left: 4px solid #0d6efd; font-weight: bold; }
+        .suppressed { color: #adb5bd; text-decoration: line-through; }
+        #statusBadge { right: calc(30% + 20px); bottom: 20px; width: 260px; }
+        #statusBadge, #measurementBadge { position: absolute; background: rgba(33, 37, 41, 0.98); color: white; padding: 14px; border-radius: 8px; font-size: 12px; display: none; box-shadow: 0 8px 24px rgba(0,0,0,0.25); z-index: 100; border: 1px solid rgba(255,255,255,0.1); min-width: 210px; }
+        #snapMarker { position: absolute; display: none; pointer-events: none; z-index: 90; width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; }
+        #snapMarker.point { border: 2px solid #00c853; background: rgba(0,200,83,0.15); }
+        #snapMarker.edge { border: 2px solid #ff9100; background: rgba(255,145,0,0.15); transform: rotate(45deg); }
+        #snapMarker.face { border: 2px solid #2979ff; border-radius: 50%; background: rgba(41,121,255,0.15); }
+        #snapMarker::after { content: attr(data-label); position: absolute; left: 18px; top: -2px; font-size: 10px; font-weight: 600; color: #212529; background: rgba(255,255,255,0.9); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
+        #snapMarker.edge::after { transform: rotate(-45deg); left: 20px; top: 6px; }
+        #measurementBadge { background: #1976d2; white-space: nowrap; pointer-events: none; padding: 6px 12px; font-weight: bold; min-width: auto; border-radius: 4px; }
+        .badge-btn { flex: 1; background: #343a40; border: 1px solid #495057; color: #f8f9fa; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .badge-btn:hover { background: #495057; }
+        .badge-btn.isolate-active { background: #0d6efd; border-color: #0d6efd; }
+        .slider-label { font-size: 10px; font-weight: 600; color: #6c757d; text-transform: uppercase; letter-spacing: 0.5px; }
+    </style>
+</head>
+<body>
+
+    <div id="toolbar">
+        <button id="btnInspect" class="tool-btn active" onclick="setToolMode('inspect')">Inspect</button>
+        <button id="btnMeasure" class="tool-btn" onclick="setToolMode('measure')">Measure</button>
+        <button id="btnHeatmap" class="tool-btn" onclick="toggleVolumeHeatmap()">Heatmap</button>
+        <button id="btnNotesFilter" class="tool-btn" onclick="toggleNotesOnlyFilter()" style="border-color: #ffc107; color: #856404;">📝 Notes Filter</button>
+        
+        <div style="border-left: 1px solid #dee2e6; height: 20px; margin: 0 4px;"></div>
+        
+        <button class="tool-btn" onclick="setViewpoint('top')">Top</button>
+        <button class="tool-btn" onclick="setViewpoint('front')">Front</button>
+        <button class="tool-btn" onclick="setViewpoint('right')">Right</button>
+        <button class="tool-btn" onclick="setViewpoint('iso')">ISO</button>
+        <button id="btnProjection" class="tool-btn" onclick="toggleCameraProjection()">Ortho</button>
+
+        <div style="border-left: 1px solid #dee2e6; height: 20px; margin: 0 4px;"></div>
+        
+        <span style="display:flex; gap:6px; align-items:center; white-space:nowrap;"><span class="slider-label">Section</span> <input type="range" id="clipSlider" min="-300" max="300" value="300" oninput="updateCrossSection(this.value)" style="width:70px;"></span>
+        
+        <span style="display:flex; gap:6px; align-items:center; white-space:nowrap;"><span class="slider-label">Explode</span> <input type="range" id="explodeSlider" min="0" max="150" value="0" oninput="updateExplodedView(this.value)" style="width:70px;"></span>
+        
+        <div style="border-left: 1px solid #dee2e6; height: 20px; margin: 0 4px;"></div>
+        
+        <select onchange="applyLightingPreset(this.value)" style="padding: 4px 8px; font-size: 12px; border-radius: 4px;">
+            <option value="laboratory">Lab</option>
+            <option value="technical">Tech</option>
+            <option value="monochrome">Mono</option>
+            <option value="showroom">Showroom</option>
+        </select>
+        <select onchange="applyLightColorPreset(this.value)" style="padding: 4px 8px; font-size: 12px; border-radius: 4px;">
+            <option value="0xffffff">White Tint</option>
+            <option value="0xffd59a">Warm</option>
+            <option value="0xa6c8ff">Blue</option>
+            <option value="0x39ff14">Laser Green</option>
+        </select>
+        <input type="range" min="10" max="300" value="100" oninput="updateLightingIntensity(this.value)" style="width:50px;">
+        
+        <button class="tool-btn" onclick="captureViewportSnapshot()" style="background: #1976d2; color: white;">📷 Snapshot</button>
+    </div>
+
+    <div id="viewer"></div>
+    <div id="statusBadge"></div>
+    <div id="measurementBadge"></div>
+    <div id="snapMarker"></div>
+
+    <div id="sidebar">
+        <h3 style="margin-top: 0; margin-bottom: 10px; color: #212529;">VE Dashboard</h3>
+        <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px; margin-bottom: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            <div style="background: white; padding: 6px; border-radius: 4px; text-align: center; border: 1px solid #e9ecef;">
+                <div style="font-size: 9px; color: #6c757d; font-weight:600;">INSTANCES</div>
+                <div id="dashTotalParts" style="font-size: 16px; font-weight: bold; color: #0d6efd;">0</div>
+            </div>
+            <div style="background: white; padding: 6px; border-radius: 4px; text-align: center; border: 1px solid #e9ecef;">
+                <div style="font-size: 9px; color: #6c757d; font-weight:600;">UNIQUE</div>
+                <div id="dashUniqueParts" style="font-size: 16px; font-weight: bold; color: #212529;">0</div>
+            </div>
+            <div style="background: white; padding: 6px; border-radius: 4px; text-align: center; border: 1px solid #e9ecef; grid-column: span 2;">
+                <div id="dashTotalVolume" style="font-size: 14px; font-weight: bold; color: #1976d2;">0 in³</div>
+            </div>
+        </div>
+
+        <button id="btnErpTab" onclick="toggleErpPanel()" style="width:100%; margin-bottom:8px; padding:6px; font-size:12px; cursor:pointer; border:1px solid #ced4da; border-radius:6px; background:white; text-align:left;">&#9656; Cost / ERP</button>
+        <div id="erpPanel" style="display:none;">
+        <div style="background: #fff; border: 2px dashed #ced4da; border-radius: 6px; padding: 10px; text-align: center; margin-bottom: 10px;">
+            <span style="font-size: 11px; display: block; margin-bottom: 5px;">📊 Drag Cost ERP Excel Here</span>
+            <input type="file" accept=".xlsx, .xls" style="font-size: 10px; width:100%;" onchange="handleExcelUpload(this)">
+        </div>
+
+        <div style="margin-bottom: 10px; display: flex; gap: 5px; align-items: center; font-size:12px;">
+            <span>Metric:</span>
+            <select id="heatmapTypeSelect" onchange="changeHeatmapMetric(this.value)" style="flex-grow: 1; padding: 3px;">
+                <option value="volume">Volume (CAD)</option>
+                <option value="cost">Unit Cost (Excel)</option>
+                <option value="op_lead_time">Lead Time (Excel)</option>
+            </select>
+        </div>
+        </div>
+
+        <button onclick="generateCustomPDFReport()" style="width: 100%; background: #198754; color: white; border: none; border-radius: 6px; padding: 8px; font-weight: bold; font-size: 12px; cursor: pointer; margin-bottom: 10px;">📄 Export VE Report</button>
+        <button onclick="showAllParts()" style="width:100%; margin-bottom:8px; padding:6px; font-size:12px; cursor:pointer; border:1px solid #ced4da; border-radius:6px; background:white;">Show all parts</button>
+        <div style="display:flex; gap:8px; align-items:center; font-size:12px; margin-bottom:8px;">
+            <span class="slider-label">Depth</span>
+            <input type="range" id="depthSlider" min="1" max="1" value="1" oninput="setViewDepth(this.value)" style="flex-grow:1;">
+            <span id="depthLabel" style="min-width:44px; text-align:right;">All</span>
+        </div>
+        <input type="text" id="searchBar" placeholder="Search component matrix..." oninput="filterBOM(this.value)">
+        <div id="bomList"></div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, gltfModel, db, controls;
+        let highlightedMeshes = [], selectedNodeUuid = null, viewDepth = Infinity, maxTreeDepth = 1;
+        let activeToolMode = 'inspect', isHeatmapActive = false, isOrthographic = false, isNotesFilterActive = false;
+        let activeHeatmapMetric = 'volume';
+        let localClipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 300);
+        
+        let measurePoints = [], measurementLine = null, measurementLabelPos = null, modelSize = 100;
+        let snapState = null;
+        const edgeCache = new WeakMap();
+        let selectedObjectPosition = null, currentActiveTargetMesh = null, globalIsolationStateActive = false;
+        
+        const assemblyExplodeMap = new Map(), originalMaterialsMap = new Map();
+        let mainMachineCenter = new THREE.Vector3(), currentLookAtTarget = new THREE.Vector3(0,0,0), activeLights = [];
+        
+        const badgeElement = document.getElementById('statusBadge');
+        const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
+
+        function initThree() {
+            const container = document.getElementById('viewer');
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 10000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.localClippingEnabled = true;
+            container.appendChild(renderer.domElement);
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; controls.dampingFactor = 0.12;
+
+            const loader = new THREE.GLTFLoader();
+			loader.load(new URLSearchParams(location.search).get('glb') || 'cad_model.glb', (gltf) => {
+			gltfModel = gltf.scene;
+			gltfModel.traverse((child) => {
+			if (child.isMesh) {
+			child.material = child.material.clone();
+			child.material.clippingPlanes = [ localClipPlane ];
+			child.material.clipShadows = true;
+			child.material.side = THREE.DoubleSide;
+				child.material.metalness = 0.1; child.material.roughness = 0.6;
+			}
+			});
+			scene.add(gltfModel);
+			computeExplodeVectors();
+			initViewportInteraction();
+			applyLightingPreset('laboratory');
+			loadViewerMetadata();
+				initDepthSlider();
+				filterBOM('');
+			animate();
+			});
+			window.addEventListener('resize', onWindowResize);
+			}
+			// Inches first, millimetres in smaller text (model units are mm)
+			const escHtml = (t) => String(t).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+			const fmtLen = (mm) => `${(mm / 25.4).toFixed(3)} in <small style="font-size:0.75em; opacity:0.75;">(${mm.toFixed(2)} mm)</small>`;
+			const fmtVol = (mm3) => `${(mm3 / 16387.064).toLocaleString(undefined, { maximumFractionDigits: 2 })} in³ <small style="font-size:0.75em; opacity:0.75;">(${Number(mm3).toLocaleString(undefined, { maximumFractionDigits: 0 })} mm³)</small>`;
+			// ---- Measurement: snapping (point > edge > face) and dimension-line drawing ----
+			function visibleHits(clientX, clientY) {
+			const rect = renderer.domElement.getBoundingClientRect();
+			mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+			mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+			raycaster.setFromCamera(mouse, camera);
+			const isShown = (o) => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+			return raycaster.intersectObjects(gltfModel.children, true).filter(h => isShown(h.object));
+			}
+			// Sharp edges of a mesh (>25 deg between faces, or open boundary), kept in the mesh's local space
+			function featureEdges(mesh) {
+			let e = edgeCache.get(mesh);
+			if (!e) { const g = new THREE.EdgesGeometry(mesh.geometry, 25); e = g.attributes.position.array; g.dispose(); edgeCache.set(mesh, e); }
+			return e;
+			}
+			function computeSnap(clientX, clientY) {
+			const hits = visibleHits(clientX, clientY);
+			if (!hits.length) return null;
+			const h = hits[0], mesh = h.object;
+			const rect = renderer.domElement.getBoundingClientRect();
+			const mx = clientX - rect.left, my = clientY - rect.top;
+			const toScreen = (v, out) => { const p = v.clone().project(camera); out[0] = (p.x * 0.5 + 0.5) * rect.width; out[1] = (-p.y * 0.5 + 0.5) * rect.height; };
+			const wpp = camera.isOrthographicCamera ? (camera.top - camera.bottom) / camera.zoom / rect.height
+				: 2 * camera.position.distanceTo(h.point) * Math.tan(camera.fov * Math.PI / 360) / rect.height;
+			const reach = 16 * wpp;
+			const arr = featureEdges(mesh); mesh.updateWorldMatrix(true, false);
+			const a = new THREE.Vector3(), b = new THREE.Vector3(), seg = new THREE.Line3(), tmp = new THREE.Vector3();
+			const sa = [0, 0], sb = [0, 0];
+			let bestPoint = null, bestPointD = 10, bestEdge = null, bestEdgeD = 8;
+			for (let i = 0; i < arr.length; i += 6) {
+			a.set(arr[i], arr[i + 1], arr[i + 2]).applyMatrix4(mesh.matrixWorld);
+			b.set(arr[i + 3], arr[i + 4], arr[i + 5]).applyMatrix4(mesh.matrixWorld);
+			seg.set(a, b); seg.closestPointToPoint(h.point, true, tmp);
+			if (tmp.distanceTo(h.point) > reach) continue; // ignore edges not near the surface under the cursor
+			toScreen(a, sa); toScreen(b, sb);
+			const da = Math.hypot(sa[0] - mx, sa[1] - my), db = Math.hypot(sb[0] - mx, sb[1] - my);
+			if (da < bestPointD) { bestPointD = da; bestPoint = a.clone(); }
+			if (db < bestPointD) { bestPointD = db; bestPoint = b.clone(); }
+			const vx = sb[0] - sa[0], vy = sb[1] - sa[1], len2 = vx * vx + vy * vy;
+			const t = len2 ? Math.max(0, Math.min(1, ((mx - sa[0]) * vx + (my - sa[1]) * vy) / len2)) : 0;
+			const de = Math.hypot(sa[0] + t * vx - mx, sa[1] + t * vy - my);
+			if (de < bestEdgeD) { bestEdgeD = de; bestEdge = a.clone().lerp(b, t); }
+			}
+			if (bestPoint) return { type: 'point', point: bestPoint };
+			if (bestEdge) return { type: 'edge', point: bestEdge };
+			return { type: 'face', point: h.point.clone() };
+			}
+			function placeSnapMarker(snap) {
+			const m = document.getElementById('snapMarker');
+			if (!snap) { m.style.display = 'none'; return; }
+			const rect = renderer.domElement.getBoundingClientRect(), p = snap.point.clone().project(camera);
+			m.style.left = ((p.x * 0.5 + 0.5) * rect.width) + 'px';
+			m.style.top = ((-p.y * 0.5 + 0.5) * rect.height) + 'px';
+			m.className = snap.type; m.dataset.label = { point: 'Point', edge: 'Edge', face: 'Face' }[snap.type];
+			m.style.display = 'block';
+			}
+			function drawDimension(p1, p2) {
+			if (measurementLine) { scene.remove(measurementLine); measurementLine.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); }
+			const g = new THREE.Group(), size = modelSize * 0.012;
+			const lineMat = new THREE.LineBasicMaterial({ color: 0x1976d2, depthTest: false, transparent: true });
+			g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, p2]), lineMat));
+			const dir = p2.clone().sub(p1).normalize();
+			[[p1, dir.clone().negate()], [p2, dir]].forEach(([pt, outward]) => {
+			const dot = new THREE.Mesh(new THREE.SphereGeometry(size * 0.45, 12, 8), new THREE.MeshBasicMaterial({ color: 0xff3d00, depthTest: false, transparent: true }));
+			dot.position.copy(pt); g.add(dot);
+			if (p1.distanceTo(p2) > size * 4) { // arrowhead: tip on the point, pointing outward along the line
+			const cone = new THREE.Mesh(new THREE.ConeGeometry(size * 0.4, size * 1.6, 12), new THREE.MeshBasicMaterial({ color: 0x1976d2, depthTest: false, transparent: true }));
+			cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), outward);
+			cone.position.copy(pt).addScaledVector(outward, -size * 0.8); g.add(cone);
+			}
+			});
+			g.traverse(o => { o.renderOrder = 999; });
+			scene.add(g); measurementLine = g;
+			}
+			function showMeasurement(p1, p2) {
+			drawDimension(p1, p2);
+			const d = p1.distanceTo(p2), dx = Math.abs(p2.x - p1.x), dy = Math.abs(p2.y - p1.y), dz = Math.abs(p2.z - p1.z);
+			measurementLabelPos = p1.clone().add(p2).multiplyScalar(0.5);
+			const badge = document.getElementById('measurementBadge');
+			badge.innerHTML = fmtLen(d) + `<br><small style="font-size:0.75em; font-weight:normal;">ΔX ${(dx / 25.4).toFixed(3)} · ΔY ${(dy / 25.4).toFixed(3)} · ΔZ ${(dz / 25.4).toFixed(3)} in</small>`;
+			badge.style.display = 'block';
+			}
+			function nodeLevel(n) { let l = 0; for (let p = n; p && p !== gltfModel; p = p.parent) if (p.userData.name) l++; return l; }
+			function initDepthSlider() {
+			gltfModel.traverse(c => { if (c.userData.name) maxTreeDepth = Math.max(maxTreeDepth, nodeLevel(c)); });
+			const sl = document.getElementById('depthSlider');
+			modelSize = new THREE.Box3().setFromObject(gltfModel).getSize(new THREE.Vector3()).length();
+			sl.max = maxTreeDepth; sl.value = maxTreeDepth; viewDepth = maxTreeDepth;
+			}
+			// Depth limits how many hierarchy levels the list shows and how coarse click-selection is;
+			// moving it expands the list down to that level.
+			function setViewDepth(v) {
+			viewDepth = parseInt(v);
+			document.getElementById('depthLabel').textContent = viewDepth >= maxTreeDepth ? 'All' : 'L' + viewDepth;
+			expandedNodes.clear();
+			gltfModel.traverse(c => { if (c.userData.name && nodeLevel(c) < viewDepth) expandedNodes.add(c.uuid); });
+			if (selectedNodeUuid) { const n = gltfModel.getObjectByProperty('uuid', selectedNodeUuid); if (n && nodeLevel(n) > viewDepth) { clearHighlight(); badgeElement.style.display = 'none'; } }
+			filterBOM(document.getElementById('searchBar').value);
+			}
+			function syncControls() {
+			controls.object = camera;
+			controls.target.copy(currentLookAtTarget);
+			camera.lookAt(currentLookAtTarget);
+			controls.update();
+			}
+			function clearHighlight() {
+			highlightedMeshes.forEach(m => m.material.emissive.setHex(0x000000));
+			highlightedMeshes = []; selectedNodeUuid = null;
+			}
+			function highlightNode(node) {
+			clearHighlight();
+			node.traverse(c => { if (c.isMesh) { c.material.emissive.setHex(0x2a55ff); highlightedMeshes.push(c); } });
+			selectedNodeUuid = node.uuid;
+			for (let p = node.parent; p; p = p.parent) expandedNodes.add(p.uuid);
+			filterBOM(document.getElementById('searchBar').value);
+			const row = document.querySelector('#bomList .bom-item.selected');
+			if (row) row.scrollIntoView({ block: 'nearest' });
+			}
+			function partName(o) { while (o && !o.userData.name) o = o.parent; return o ? o.userData.name : ''; }
+			function onWindowResize() {
+			const container = document.getElementById('viewer');
+			camera.aspect = container.clientWidth / container.clientHeight;
+			camera.projectionMatrix.needsUpdate = true;
+			renderer.setSize(container.clientWidth, container.clientHeight);
+			}
+			async function initSQLite() {
+			const config = { locateFile: file => `lib/${file}` };
+			const SQL = await initSqlJs(config);
+			const response = await fetch(new URLSearchParams(location.search).get('db') || 'bom_data.sqlite');
+			const arrayBuffer = await response.arrayBuffer();
+			db = new SQL.Database(new Uint8Array(arrayBuffer));
+			try {
+			db.run("ALTER TABLE bom ADD COLUMN cost REAL DEFAULT 0.0;");
+			db.run("ALTER TABLE bom ADD COLUMN op_lead_time INTEGER DEFAULT 0;");
+			db.run("ALTER TABLE bom ADD COLUMN notes TEXT DEFAULT '';");
+			} catch(e) {}
+			db.run("CREATE TABLE IF NOT EXISTS assembly_cost (name TEXT PRIMARY KEY, cost REAL);");
+			filterBOM('');
+			updateDashboardMetrics();
+			}
+			function loadViewerMetadata() {
+			try {
+			const stmt = db.prepare("SELECT cx, cy, cz, max_dim FROM viewer_metadata LIMIT 1;");
+			if (stmt.step()) {
+			const meta = stmt.getAsObject();
+			currentLookAtTarget.set(meta.cx, meta.cy, meta.cz);
+			camera.position.set(meta.cx + meta.max_dim, meta.cy + meta.max_dim, meta.cz + meta.max_dim);
+			syncControls();
+			}
+			stmt.free();
+			} catch(e) {
+			const box = new THREE.Box3().setFromObject(gltfModel);
+			box.getCenter(currentLookAtTarget);
+			syncControls();
+			}
+			}
+			function setToolMode(mode) {
+			activeToolMode = mode;
+			document.getElementById('btnInspect').classList.toggle('active', mode === 'inspect');
+			document.getElementById('btnMeasure').classList.toggle('active', mode === 'measure');
+			if (mode !== 'measure') clearMeasurement();
+			badgeElement.style.display = 'none';
+			}
+			function updateCrossSection(value) { localClipPlane.constant = parseFloat(value); }
+			function updateLightingIntensity(val) { activeLights.forEach(l => { if(!l.isAmbientLight) l.intensity = 0.8 * (val/100); }); }
+			function applyLightColorPreset(hex) { activeLights.forEach(l => { if(!l.isAmbientLight) l.color.setHex(parseInt(hex)); }); }
+			function clearMeasurement() {
+			measurePoints = [];
+			if (measurementLine) { scene.remove(measurementLine); measurementLine.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); measurementLine = null; }
+			snapState = null; document.getElementById('snapMarker').style.display = 'none';
+			document.getElementById('measurementBadge').style.display = 'none';
+			measurementLabelPos = null;
+			}
+			function computeExplodeVectors() {
+			const masterBox = new THREE.Box3().setFromObject(gltfModel);
+			masterBox.getCenter(mainMachineCenter);
+			gltfModel.children.forEach((subAssembly) => {
+			const subBox = new THREE.Box3().setFromObject(subAssembly);
+			const subCenter = new THREE.Vector3();
+			subBox.getCenter(subCenter);
+			let direction = new THREE.Vector3().subVectors(subCenter, mainMachineCenter);
+			if (direction.lengthSq() < 0.01) direction.set(0, 1, 0);
+			else direction.normalize();
+			assemblyExplodeMap.set(subAssembly.uuid, { originalPosition: subAssembly.position.clone(), explodeDirection: direction });
+			});
+			}
+			function updateExplodedView(factor) {
+			assemblyExplodeMap.forEach((meta, uuid) => {
+			const node = gltfModel.getObjectByProperty('uuid', uuid);
+			if (node) {
+			const offset = meta.explodeDirection.clone().multiplyScalar(parseFloat(factor));
+			node.position.copy(meta.originalPosition).add(offset);
+			}
+			});
+			clearMeasurement();
+			}
+			function applyLightingPreset(presetName) {
+			activeLights.forEach(l => scene.remove(l)); activeLights = [];
+			if (presetName === 'laboratory') {
+			scene.background = new THREE.Color(0xf8f9fa);
+			activeLights.push(new THREE.AmbientLight(0xffffff, 0.9), new THREE.DirectionalLight(0xffffff, 0.8));
+			activeLights[1].position.set(200,400,200);
+			} else if (presetName === 'technical') {
+			scene.background = new THREE.Color(0x1a1d20);
+			activeLights.push(new THREE.AmbientLight(0xffffff, 0.9), new THREE.DirectionalLight(0x0d6efd, 1.2));
+			activeLights[1].position.set(300,500,100);
+			} else {
+			scene.background = new THREE.Color(0x000000);
+			activeLights.push(new THREE.AmbientLight(0xffffff, 0.7), new THREE.DirectionalLight(0xffffff, 1.5));
+			activeLights[1].position.set(0,500,0);
+			}
+			activeLights.forEach(l => scene.add(l));
+			}
+			function setViewpoint(view) {
+			const box = new THREE.Box3().setFromObject(gltfModel);
+			const dist = Math.max(box.getSize(new THREE.Vector3()).x, box.getSize(new THREE.Vector3()).y) * 1.5;
+			camera.up.set(0, 1, 0);
+			if(view==='top') { camera.position.set(currentLookAtTarget.x, currentLookAtTarget.y+dist, currentLookAtTarget.z); }
+			else if(view==='front') camera.position.set(currentLookAtTarget.x, currentLookAtTarget.y, currentLookAtTarget.z+dist);
+			else if(view==='right') camera.position.set(currentLookAtTarget.x+dist, currentLookAtTarget.y, currentLookAtTarget.z);
+			else camera.position.set(currentLookAtTarget.x+dist/2, currentLookAtTarget.y+dist/2, currentLookAtTarget.z+dist/2);
+			syncControls();
+			}
+			function toggleCameraProjection() {
+			isOrthographic = !isOrthographic;
+			const container = document.getElementById('viewer');
+			const aspect = container.clientWidth / container.clientHeight;
+			const box = new THREE.Box3().setFromObject(gltfModel);
+			const fSize = Math.max(box.getSize(new THREE.Vector3()).x, box.getSize(new THREE.Vector3()).y) * 1.2;
+			const p = camera.position.clone(), r = camera.rotation.clone();
+			camera = isOrthographic ? new THREE.OrthographicCamera((fSize*aspect)/-2, (fSize*aspect)/2, fSize/2, fSize/-2, 0.1, 10000) : new THREE.PerspectiveCamera(45, aspect, 0.1, 10000);
+			camera.position.copy(p); camera.rotation.copy(r); syncControls();
+			}
+			function captureViewportSnapshot() {
+			renderer.render(scene, camera);
+			const link = document.createElement('a'); link.href = renderer.domElement.toDataURL('image/jpeg', 0.92);
+			link.download = `cad_snapshot_${new Date().getTime()}.jpg`; link.click();
+			}
+			function handleExcelUpload(input) {
+			const file = input.files[0]; if (!file) return;
+			const r = new FileReader();
+			r.onload = function(e) {
+			const data = new Uint8Array(e.target.result);
+			const wb = XLSX.read(data, { type: 'array' });
+			const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+			const assemblyNames = new Set();
+			gltfModel.traverse(n => { if (n.userData.name && n.children.some(c => c.userData.name)) assemblyNames.add(n.userData.name); });
+			rows.forEach(row => {
+			const pNum = row['Part Number'], cost = parseFloat(row['Cost']) || 0.0, lead = parseInt(row['Lead Time']) || 0;
+			if (pNum && assemblyNames.has(String(pNum))) {
+			const a = db.prepare("INSERT OR REPLACE INTO assembly_cost (name, cost) VALUES (?, ?);"); a.run([String(pNum), cost]); a.free();
+			} else if (pNum) {
+			const s = db.prepare("UPDATE bom SET cost = ?, op_lead_time = ? WHERE sample_name LIKE '%' || ? || '%';");
+			s.run([cost, lead, pNum]); s.free();
+			}
+			});
+			alert("ERP Metadata Synced Successfully!"); filterBOM('');
+			};
+			r.readAsArrayBuffer(file);
+			}
+			function changeHeatmapMetric(val) { activeHeatmapMetric = val; if(isHeatmapActive) { isHeatmapActive=false; toggleVolumeHeatmap(); } }
+			function toggleVolumeHeatmap() {
+			isHeatmapActive = !isHeatmapActive;
+			document.getElementById('btnHeatmap').classList.toggle('active', isHeatmapActive);
+			if (isHeatmapActive) {
+			let col = activeHeatmapMetric === 'volume' ? 'volume' : (activeHeatmapMetric === 'cost' ? 'cost' : 'op_lead_time');
+			const b = db.prepare(`SELECT MIN(${col}) as min_v, MAX(${col}) as max_v FROM bom WHERE pipeline_action='RETAINED';`); b.step();
+			const bounds = b.getAsObject(); b.free();
+			const minV = bounds.min_v || 0, maxV = bounds.max_v || 1;
+			gltfModel.traverse((child) => {
+			if (child.isMesh) {
+			if (!originalMaterialsMap.has(child.uuid)) originalMaterialsMap.set(child.uuid, child.material);
+			const s = db.prepare(`SELECT ${col} as val FROM bom WHERE $n = sample_name LIMIT 1;`);
+			s.bind({ $n: partName(child) }); let v = minV; if(s.step()) v = s.getAsObject().val; s.free();
+			const f = (v - minV) / ((maxV - minV) || 1);
+			const c = new THREE.Color();
+			if (f < 0.5) c.setRGB(0, f*2, 1-(f*2)); else c.setRGB((f-0.5)*2, 1-((f-0.5)*2), 0);
+			child.material = new THREE.MeshBasicMaterial({ color: c, clippingPlanes: [localClipPlane], side: THREE.DoubleSide });
+			}
+			});
+			} else {
+			gltfModel.traverse(c => { if(c.isMesh && originalMaterialsMap.has(c.uuid)) c.material = originalMaterialsMap.get(c.uuid); });
+			}
+			}
+			function toggleNotesOnlyFilter() {
+			isNotesFilterActive = !isNotesFilterActive;
+			document.getElementById('btnNotesFilter').classList.toggle('active', isNotesFilterActive);
+			const notesParts = new Set();
+			const s = db.prepare("SELECT sample_name FROM bom WHERE notes IS NOT NULL AND notes != '';");
+			while(s.step()) notesParts.add(s.getAsObject().sample_name); s.free();
+			gltfModel.traverse((child) => {
+			if (child.isMesh || child.isGroup) {
+			if (child === gltfModel) return;
+			if (isNotesFilterActive) {
+			child.visible = Array.from(notesParts).some(n => partName(child) === n);
+			} else {
+			const s2 = db.prepare("SELECT pipeline_action FROM bom WHERE $n = sample_name LIMIT 1;");
+			s2.bind({ $n: partName(child) }); child.visible = !s2.step() || s2.getAsObject().pipeline_action === 'RETAINED'; s2.free();
+			}
+			}
+			});
+			}
+			const expandedNodes = new Set();
+			let showCosts = false;
+			function toggleErpPanel() {
+			showCosts = !showCosts;
+			document.getElementById('erpPanel').style.display = showCosts ? 'block' : 'none';
+			document.getElementById('btnErpTab').innerHTML = (showCosts ? '&#9662;' : '&#9656;') + ' Cost / ERP';
+			filterBOM(document.getElementById('searchBar').value);
+			}
+			const byName = (a, b) => a.userData.name.localeCompare(b.userData.name, undefined, { numeric: true, sensitivity: 'base' });
+			function filterBOM(s) {
+			const list = document.getElementById('bomList'); list.innerHTML = '';
+			if (!gltfModel || !db) return;
+			const q = (s || '').toLowerCase();
+			const info = db.prepare("SELECT * FROM bom WHERE sample_name = $n LIMIT 1;");
+			const lookup = (name) => { info.bind({ $n: name }); const d = info.step() ? info.getAsObject() : null; info.reset(); return d; };
+			const matches = (node) => {
+			if (!node.userData.name) return false;
+			if (node.userData.name.toLowerCase().includes(q)) return true;
+			const d = lookup(node.userData.name); return !!d && d.classification.toLowerCase().includes(q);
+			};
+			const ownCost = db.prepare("SELECT cost FROM assembly_cost WHERE name = $n;");
+			const nodeCost = (node) => {
+			const nm = node.userData.name, kids = node.children.filter(c => c.userData.name);
+			if (!kids.length) { const d = lookup(nm); return d ? (d.cost || 0) : 0; }
+			ownCost.bind({ $n: nm }); const has = ownCost.step(); const v = has ? ownCost.getAsObject().cost : null; ownCost.reset();
+			return has ? v : kids.reduce((t, c) => t + nodeCost(c), 0);
+			};
+			const subtreeMatches = (node) => matches(node) || node.children.some(subtreeMatches);
+			const renderNode = (node, depth) => {
+			if (q && !subtreeMatches(node)) return;
+			const allKids = node.children.filter(c => c.userData.name).sort(byName);
+			const kids = depth + 1 >= viewDepth ? [] : allKids;
+			const d = lookup(node.userData.name);
+			const row = document.createElement('div');
+			row.className = 'bom-item' + (d && d.pipeline_action === 'DELETED' ? ' suppressed' : '') + (node.uuid === selectedNodeUuid ? ' selected' : '');
+			row.style.paddingLeft = (8 + depth * 16) + 'px';
+			const open = q || expandedNodes.has(node.uuid);
+			const toggle = document.createElement('span');
+			toggle.textContent = kids.length ? (open ? '▾ ' : '▸ ') : '   ';
+			toggle.style.cursor = 'pointer';
+			toggle.onclick = (e) => { e.stopPropagation(); if (expandedNodes.has(node.uuid)) expandedNodes.delete(node.uuid); else expandedNodes.add(node.uuid); filterBOM(document.getElementById('searchBar').value); };
+			const label = document.createElement('strong');
+			label.textContent = node.userData.name;
+			row.appendChild(toggle); row.appendChild(label);
+			if (allKids.length) { const n = document.createElement('small'); n.textContent = ' (' + allKids.length + ')'; row.appendChild(n); }
+			if (d || (showCosts && allKids.length)) {
+			const m = document.createElement('small'); m.style.display = 'block';
+			const bits = [];
+			if (showCosts) bits.push('Cost: $' + nodeCost(node).toFixed(2));
+			if (d) { bits.push('Vol: ' + fmtVol(d.volume)); bits.push('Note: ' + escHtml(d.notes || 'None')); }
+			m.innerHTML = bits.join(' | '); if (bits.length) row.appendChild(m);
+			}
+			row.onclick = () => { isolateNodeFromBOM(node); highlightNode(node); };
+			list.appendChild(row);
+			if (open) kids.forEach(c => renderNode(c, depth + 1));
+			};
+			gltfModel.children.filter(c => c.userData.name).sort(byName).forEach(c => renderNode(c, 0));
+			info.free(); ownCost.free();
+			}
+			const suppressedParts = new Set();
+			function showAllParts() {
+			// Undo Hide (runtime suppression), Isolate and the Notes filter so nothing stays hidden
+			suppressedParts.forEach(n => { const u = db.prepare("UPDATE bom SET pipeline_action='RETAINED' WHERE sample_name=?;"); u.run([n]); u.free(); });
+			suppressedParts.clear();
+			globalIsolationStateActive = false;
+			isNotesFilterActive = false;
+			document.getElementById('btnNotesFilter').classList.remove('active');
+			gltfModel.traverse(c => { c.visible = true; });
+			filterBOM(document.getElementById('searchBar').value); updateDashboardMetrics();
+			}
+			function isolateNodeFromBOM(node) {
+			if (!gltfModel) return;
+			gltfModel.traverse(c => { if (c !== gltfModel) c.visible = false; });
+			node.traverse(c => { c.visible = true; });
+			for (let p = node.parent; p; p = p.parent) p.visible = true;
+			const box = new THREE.Box3().setFromObject(node);
+			box.getCenter(currentLookAtTarget); syncControls();
+			}
+			function savePartNotes(name, text) {
+			const s = db.prepare("UPDATE bom SET notes = ? WHERE sample_name = ?;"); s.run([text, name]); s.free();
+			filterBOM(document.getElementById('searchBar').value);
+			}
+			function updateDashboardMetrics() {
+			const s1 = db.prepare("SELECT SUM(occurrences) as t_i, COUNT(id) as u_i FROM bom;"); s1.step();
+			document.getElementById('dashTotalParts').innerText = s1.getAsObject().t_i || 0;
+			document.getElementById('dashUniqueParts').innerText = s1.getAsObject().u_i || 0; s1.free();
+			const s2 = db.prepare("SELECT SUM(volume * occurrences) as v FROM bom WHERE pipeline_action='RETAINED';"); s2.step();
+			document.getElementById('dashTotalVolume').innerHTML = fmtVol(s2.getAsObject().v || 0); s2.free();
+			}
+			function suppressCurrentComponent() {
+			if(!currentActiveTargetMesh) return; currentActiveTargetMesh.visible = false;
+			const s = db.prepare("UPDATE bom SET pipeline_action='DELETED' WHERE sample_name=?;"); s.run([partName(currentActiveTargetMesh)]); s.free(); suppressedParts.add(partName(currentActiveTargetMesh));
+			filterBOM(''); updateDashboardMetrics(); badgeElement.style.display = 'none';
+			}
+			function toggleComponentIsolation() {
+			globalIsolationStateActive = !globalIsolationStateActive;
+			gltfModel.traverse(c => { if(c!==gltfModel && c!==currentActiveTargetMesh) c.visible = !globalIsolationStateActive; });
+			// keep the selected part's ancestors and descendants shown, or it would vanish with its parents
+			for (let p = currentActiveTargetMesh && currentActiveTargetMesh.parent; p; p = p.parent) p.visible = true;
+			if (currentActiveTargetMesh) currentActiveTargetMesh.traverse(c => { c.visible = true; });
+			}
+			function initViewportInteraction() {
+			const container = document.getElementById('viewer');
+			let downPos = null;
+			container.addEventListener('pointerdown', (e) => { downPos = [e.clientX, e.clientY]; });
+			let movePending = false;
+			container.addEventListener('pointermove', (e) => {
+			if (activeToolMode !== 'measure' || e.buttons || movePending) return;
+			if (e.target.closest('#toolbar') || e.target.closest('#statusBadge')) return;
+			movePending = true;
+			requestAnimationFrame(() => {
+			movePending = false;
+			snapState = computeSnap(e.clientX, e.clientY);
+			placeSnapMarker(snapState);
+			if (snapState && measurePoints.length === 1) showMeasurement(measurePoints[0], snapState.point); // rubber-band preview
+			});
+			});
+			container.addEventListener('pointerleave', () => { if (activeToolMode === 'measure') { snapState = null; placeSnapMarker(null); } });
+			container.addEventListener('click', (e) => {
+			if (e.target.closest('#statusBadge') || e.target.closest('#toolbar')) return;
+			if (downPos && Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]) > 5) return; // orbit/pan drag, not a click
+			const rect = renderer.domElement.getBoundingClientRect();
+			mouse.x = ((e.clientX - rect.left) / container.clientWidth) * 2 - 1;
+			mouse.y = -((e.clientY - rect.top) / container.clientHeight) * 2 + 1;
+			raycaster.setFromCamera(mouse, camera);
+			const isShown = (o) => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+			const intersects = raycaster.intersectObjects(gltfModel.children, true).filter(h => isShown(h.object));
+			if (intersects.length > 0) {
+			const hitPoint = intersects[0].point; let hitObj = intersects[0].object;
+			if (activeToolMode === 'measure') {
+			const pt = (snapState || computeSnap(e.clientX, e.clientY) || { point: hitPoint }).point.clone();
+			if (measurePoints.length !== 1) { clearMeasurement(); measurePoints = [pt]; showMeasurement(pt, pt); document.getElementById('measurementBadge').style.display = 'none'; }
+			else { showMeasurement(measurePoints[0], pt); measurePoints = []; }
+			return;
+			}
+			while (hitObj.parent && hitObj.parent !== gltfModel && !hitObj.userData.name) hitObj = hitObj.parent;
+			while (hitObj.parent && hitObj.parent !== gltfModel && nodeLevel(hitObj) > viewDepth) hitObj = hitObj.parent;
+			if (hitObj.userData.name) {
+			currentActiveTargetMesh = hitObj; highlightNode(hitObj);
+			selectedObjectPosition = new THREE.Vector3(); new THREE.Box3().setFromObject(hitObj).getCenter(selectedObjectPosition);
+			const s = db.prepare("SELECT * FROM bom WHERE $c = sample_name LIMIT 1;");
+			s.bind({ $c: hitObj.userData.name });
+			if (s.step()) {
+			const d = s.getAsObject();
+			badgeElement.innerHTML = `<strong>${d.sample_name}</strong><br><small>Vol: ${fmtVol(d.volume)}</small><textarea placeholder="Add VE Notes..." oninput="savePartNotes('${d.sample_name}', this.value)" style="width:100%; height:40px; margin-top:5px; background:#222; color:#fff; border:1px solid #444;">${d.notes||''}</textarea><div style="display:flex; gap:5px; margin-top:5px;"><button class="badge-btn" onclick="toggleComponentIsolation()">Isolate</button><button class="badge-btn" onclick="suppressCurrentComponent()" style="background:#b02a37;">Hide</button></div>`;
+			badgeElement.style.display = 'block';
+			} else {
+			const nKids = hitObj.children.filter(c => c.userData.name).length;
+			badgeElement.innerHTML = `<strong>${hitObj.userData.name}</strong><br><small>${nKids ? 'Assembly, ' + nKids + ' sub-items' : 'No BOM data'}</small><div style="display:flex; gap:5px; margin-top:5px;"><button class="badge-btn" onclick="toggleComponentIsolation()">Isolate</button><button class="badge-btn" onclick="suppressCurrentComponent()" style="background:#b02a37;">Hide</button></div>`;
+			badgeElement.style.display = 'block';
+			}
+			s.free();
+			}
+			} else if (activeToolMode === 'measure') { return; } else { badgeElement.style.display = 'none'; selectedObjectPosition = null; clearHighlight(); filterBOM(document.getElementById('searchBar').value); }
+			});
+			}
+			function animate() {
+			requestAnimationFrame(animate);
+			const container = document.getElementById('viewer');
+			if (measurementLabelPos && document.getElementById('measurementBadge').style.display === 'block') {
+			const wp = measurementLabelPos.clone().project(camera);
+			const l = document.getElementById('measurementBadge');
+			l.style.left = `${(wp.x * .5 + .5) * container.clientWidth - (l.clientWidth / 2)}px`;
+			l.style.top = `${(-(wp.y * .5) + .5) * container.clientHeight - 30}px`;
+			}
+			controls.update();
+			renderer.render(scene, camera);
+			}
+			async function generateCustomPDFReport() {
+			const { jsPDF } = window.jspdf; const doc = new jsPDF('p', 'pt', 'letter'); let y = 40;
+			doc.setFillColor(25, 118, 210); doc.rect(40, y, 532, 4, 'F'); y += 20;
+			doc.setFont("helvetica", "bold"); doc.setFontSize(14); doc.text("VALUE ENGINEERING DESIGN ANALYSIS MANIFEST", 40, y); y += 20;
+			const s = db.prepare("SELECT sample_name, occurrences, cost, notes FROM bom WHERE notes != '';");
+			doc.setFontSize(10);
+			while(s.step()) {
+			const r = s.getAsObject(); if(y > 700) { doc.addPage(); y = 50; }
+			doc.setFont("helvetica", "bold"); doc.text(`Part: ${r.sample_name} (Qty: ${r.occurrences} | Cost: $${r.cost})`, 40, y); y += 15;
+			doc.setFont("helvetica", "normal"); doc.text(`Note: ${r.notes}`, 50, y); y += 20;
+			}
+			s.free(); doc.save('Value_Engineering_Report.pdf');
+			}
+			initSQLite().then(initThree);
+    </script>
+</body>
+</html>
